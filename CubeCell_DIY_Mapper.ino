@@ -8,11 +8,15 @@
 
 extern SSD1306Wire  display; 
 
-//when gps waked, if in GPS_UPDATE_TIMEOUT, gps not fixed then into low power mode
-#define GPS_UPDATE_TIMEOUT 60000
+//How long to wait for GPS Fix if no fix in 2 minutes send update
+#define GPS_UPDATE_TIMEOUT 120000
 
-//Wait 20 Secondsbetween GPS transmits
-#define GPS_CONTINUE_TIME 20000
+//Wait 10 Seconds after FIX for GPS to stabalise
+#define GPS_CONTINUE_TIME 8000
+#define MOVING_UPDATE_RATE 1000 //in addition to GPS_CONTINUE_TIME
+#define STOPPED_UPDATE_RATE 50000 //In addition to GPS_CONTINUE_TIME
+#define SLEEPING_UPDATE_RATE 21600000 //Update every 6hrs when sleeping
+bool sleepMode = false;
 /*
    set LoraWan_RGB to Active,the RGB active in loraWan
    RGB red means sending;
@@ -34,7 +38,7 @@ uint8_t appSKey[] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 uint32_t devAddr =  ( uint32_t )0x00000000;
 
 /*LoraWan channelsmask, default channels 0-7*/ 
-uint16_t userChannelsMask[6]={ 0x00FF,0x0000,0x0000,0x0000,0x0000,0x0000 };
+uint16_t userChannelsMask[6]={ 0xFF00,0x0000,0x0000,0x0000,0x0000,0x0000 };
 
 /*LoraWan region, select in arduino IDE tools*/
 LoRaMacRegion_t loraWanRegion = ACTIVE_REGION;
@@ -43,7 +47,7 @@ LoRaMacRegion_t loraWanRegion = ACTIVE_REGION;
 DeviceClass_t  loraWanClass = LORAWAN_CLASS;
 
 /*the application data transmission duty cycle.  value in [ms].*/
-uint32_t appTxDutyCycle = 15000;
+uint32_t appTxDutyCycle = 1000;
 
 /*OTAA or ABP*/
 bool overTheAirActivation = LORAWAN_NETMODE;
@@ -117,6 +121,16 @@ void displayGPSInof()
   {
     display.drawString(120, 0, "V");
   }
+
+
+  if( Air530.speed.kmph() > 1.2 )
+  {
+    display.drawString(107, 0, "M");
+  }
+  else
+  {
+    display.drawString(107, 0, "S");
+  }
   
   index = sprintf(str,"alt: %d.%d",(int)Air530.altitude.meters(),fracPart(Air530.altitude.meters(),2));
   str[index] = 0;
@@ -130,20 +144,19 @@ void displayGPSInof()
   str[index] = 0;
   display.drawString(60, 16, str);   
   
-  index = sprintf(str,"lon:%d.%d",(int)Air530.location.lng(),fracPart(Air530.location.lng(),4));
+  index = sprintf(str,"lon: %d.%d",(int)Air530.location.lng(),fracPart(Air530.location.lng(),4));
   str[index] = 0;
   display.drawString(60, 32, str);
 
-  index = sprintf(str,"speed: %d.%d km/h",(int)Air530.speed.kmph(),fracPart(Air530.speed.kmph(),3));
+  index = sprintf(str,"speed: %d.%d km/h",(int)Air530.speed.kmph(),fracPart(Air530.speed.kmph(),2));
   str[index] = 0;
   display.drawString(0, 48, str);
   display.display();
-  
-  index = sprintf(str,"sats:%d",(int)Air530.satellites.value());
+
+  index = sprintf(str,"sats: %d",(int)Air530.satellites.value());
   str[index] = 0;
-  display.drawString(87, 48, str);
+  display.drawString(88, 48, str);
   display.display();
-  
 }
 
 void printGPSInof()
@@ -200,7 +213,9 @@ static void prepareTxFrame( uint8_t port )
     the max value for different DR can be found in MaxPayloadOfDatarateCN470 refer to DataratesCN470 and BandwidthsCN470 in "RegionCN470.h".
   */
 
-  float lat, lon, alt, course, speed, hdop, sats;
+  uint32_t lat, lon;
+  int  alt, course, speed, hdop, sats;
+
   
   Serial.println("Waiting for GPS FIX ...");
 
@@ -217,6 +232,7 @@ static void prepareTxFrame( uint8_t port )
   
   Air530.begin();
   delay(1000);      //Added to improve acquisition
+ 
   uint32_t start = millis();
   while( (millis()-start) < GPS_UPDATE_TIMEOUT )
   {
@@ -231,7 +247,6 @@ static void prepareTxFrame( uint8_t port )
     }
   }
   
-  //if gps fixed,  GPS_CONTINUE_TIME later stop GPS into low power mode, and every 1 second update gps, print and display gps info
   if(Air530.location.age() < 1000)
   {
     start = millis();
@@ -267,105 +282,131 @@ static void prepareTxFrame( uint8_t port )
   display.stop();
   VextOFF(); //oled power off
   
-  lat = Air530.location.lat();
-  lon = Air530.location.lng();
-  alt = Air530.altitude.meters();
+  lat = (uint32_t)(Air530.location.lat()*1E7);
+  lon = (uint32_t)(Air530.location.lng()*1E7);
+  alt = (uint16_t)Air530.altitude.meters();
   course = Air530.course.deg();
-  speed = Air530.speed.kmph();
+  speed = (Air530.speed.kmph())*100;
   sats = Air530.satellites.value();
   hdop = Air530.hdop.hdop();
 
   uint16_t batteryVoltage = getBatteryVoltage();
-
   unsigned char *puc;
-
   appDataSize = 0;
-  puc = (unsigned char *)(&sats);
-  appData[appDataSize++] = puc[0];
-  appData[appDataSize++] = puc[1];
-  appData[appDataSize++] = puc[2];
-  appData[appDataSize++] = puc[3];
-  puc = (unsigned char *)(&lat);
-  appData[appDataSize++] = puc[0];
-  appData[appDataSize++] = puc[1];
-  appData[appDataSize++] = puc[2];
-  appData[appDataSize++] = puc[3];
-  puc = (unsigned char *)(&lon);
-  appData[appDataSize++] = puc[0];
-  appData[appDataSize++] = puc[1];
-  appData[appDataSize++] = puc[2];
-  appData[appDataSize++] = puc[3];
-  puc = (unsigned char *)(&alt);
-  appData[appDataSize++] = puc[0];
-  appData[appDataSize++] = puc[1];
-  appData[appDataSize++] = puc[2];
-  appData[appDataSize++] = puc[3];
-  puc = (unsigned char *)(&course);
-  appData[appDataSize++] = puc[0];
-  appData[appDataSize++] = puc[1];
-  appData[appDataSize++] = puc[2];
-  appData[appDataSize++] = puc[3];
-  puc = (unsigned char *)(&speed);
-  appData[appDataSize++] = puc[0];
-  appData[appDataSize++] = puc[1];
-  appData[appDataSize++] = puc[2];
-  appData[appDataSize++] = puc[3];
-  puc = (unsigned char *)(&hdop);
-  appData[appDataSize++] = puc[0];
-  appData[appDataSize++] = puc[1];
-  appData[appDataSize++] = puc[2];
-  appData[appDataSize++] = puc[3];
-  appData[appDataSize++] = (uint8_t)(batteryVoltage >> 8);
-  appData[appDataSize++] = (uint8_t)batteryVoltage;
 
-  Serial.print("SATS: ");
-  Serial.print(Air530.satellites.value());
-  Serial.print(", HDOP: ");
-  Serial.print(Air530.hdop.hdop());
-  Serial.print(", LAT: ");
-  Serial.print(Air530.location.lat());
-  Serial.print(", LON: ");
-  Serial.print(Air530.location.lng());
-  Serial.print(", AGE: ");
-  Serial.print(Air530.location.age());
-  Serial.print(", ALT: ");
-  Serial.print(Air530.altitude.meters());
-  Serial.print(", COURSE: ");
-  Serial.print(Air530.course.deg());
-  Serial.print(", SPEED: ");
-  Serial.println(Air530.speed.kmph());
+  puc = (unsigned char *)(&lat);
+  appData[appDataSize++] = puc[3];
+  appData[appDataSize++] = puc[2];
+  appData[appDataSize++] = puc[1];
+  appData[appDataSize++] = puc[0];
+
+  puc = (unsigned char *)(&lon);
+  appData[appDataSize++] = puc[3];
+  appData[appDataSize++] = puc[2];
+  appData[appDataSize++] = puc[1];
+  appData[appDataSize++] = puc[0];
+  
+  puc = (unsigned char *)(&alt);
+  appData[appDataSize++] = puc[1];
+  appData[appDataSize++] = puc[0];
+  
+  appData[appDataSize++] = (uint8_t)(sats & 0xFF);
+
+  appData[appDataSize++] = (uint8_t)(speed >> 8);
+  appData[appDataSize++] = (uint8_t)speed;
+
+  appData[appDataSize++] = (uint8_t)((batteryVoltage/20) & 0xFF);
+
+
+  puc = (unsigned char *)(&lat);
+  Serial.println(lat,DEC);
+  
+  Serial.print("Hex");
+  Serial.println(*puc,HEX);
+  Serial.print("Dec");
+  Serial.println(*puc,DEC);
+  
   Serial.print(" BatteryVoltage:");
   Serial.println(batteryVoltage);
+
+  Serial.print(" sleepMode = ");
+  Serial.println(sleepMode);
+
+
+  
+  
 }
 
 
 void setup() {
   boardInitMcu();
   Serial.begin(115200);
-
-/*three modes supported: 
-  * GPS        :    MODE_GPS - this works
-  * GPS+BEIDOU :    MODE_GPS_BEIDOU this works 
-  * GPS+GLONASS:    MODE_GPS_GLONASS this works 
-  * GPS+GALILEO:    MODE_GPS_GALILEO this does not work
-  * GPS+BEIDOU+GLONASS+GALILEO:   MODE_GPS_MULTI   this does not work
-  * default mode is GPS+BEIDOU.
-  */
   Air530.setmode(MODE_GPS_GLONASS);      // was added to enable GLONASS and GPS GNSS networks 
- 
-  String NMEA = Air530.getGSA();
   
-  /*supported nmea sentence :
-  * GLL, RMC, VTG, GGA, GSA, GSV
-  */
-//  Air530.setNMEA(NMEA_GGA|NMEA_GSA|NMEA_RMC|NMEA_VTG);  // was commented out  but uncomment to see messages   (NMEA_GGA|NMEA_GSA|NMEA_RMC|NMEA_VTG);
-
+  //setup user button
+  pinMode(P3_3,INPUT);
+  attachInterrupt(P3_3,userKey,FALLING); 
+  
 #if(AT_SUPPORT)
   enableAt();
 #endif
   LoRaWAN.displayMcuInit();
   deviceState = DEVICE_STATE_INIT;
   LoRaWAN.ifskipjoin();
+}
+
+void userKey(void)
+{
+  delay(10);
+  if(digitalRead(P3_3)==0)
+  {
+    uint16_t keyDownTime = 0;
+    while(digitalRead(P3_3)==0)
+    {
+      delay(1);
+      keyDownTime++;
+      if(keyDownTime>=700)
+      break;
+    }
+    if(keyDownTime<700)
+    {
+      if (sleepMode)
+      {
+        sleepMode = false;
+        LoRaWAN.cycle(2000);
+        VextON();// oled power on;
+        delay(10); 
+        display.init();
+        display.clear();
+      
+        display.setTextAlignment(TEXT_ALIGN_CENTER);
+        display.setFont(ArialMT_Plain_16);
+        display.drawString(64, 32-16/2, "Waking UP....");
+        Serial.println("Waking UP...");
+        display.display();
+        delay(4000);
+        
+      }
+      else
+      {
+        sleepMode = true;
+        Serial.print("SleepMode = ");
+        Serial.println(sleepMode);
+        LoRaWAN.cycle(2000);
+        VextON();// oled power on;
+        delay(10); 
+        display.init();
+        display.clear();
+      
+        display.setTextAlignment(TEXT_ALIGN_CENTER);
+        display.setFont(ArialMT_Plain_16);
+        display.drawString(64, 32-16/2, "Sleeping....");
+        Serial.println("Sleeping...");
+        display.display();
+        delay(4000);
+      }
+    }
+  }
 }
 
 void loop()
@@ -394,20 +435,40 @@ void loop()
       LoRaWAN.displaySending();
       LoRaWAN.send();
       display.stop();
+      VextOFF();// oled power off;
       deviceState = DEVICE_STATE_CYCLE;
       break;
     }
     case DEVICE_STATE_CYCLE:
     {
       // Schedule next packet transmission
-      txDutyCycleTime = appTxDutyCycle + randr( 0, APP_TX_DUTYCYCLE_RND );
+      if (sleepMode) appTxDutyCycle = SLEEPING_UPDATE_RATE;
+      else
+      {
+        if ( Air530.speed.kmph() > 1.2) 
+        {
+        appTxDutyCycle = MOVING_UPDATE_RATE;
+        Serial.print("Speed = ");
+        Serial.print(Air530.speed.kmph());
+        Serial.println(" MOVING");
+        }
+  
+      else 
+        {
+        appTxDutyCycle = STOPPED_UPDATE_RATE;
+        Serial.print("Speed = ");
+        Serial.print(Air530.speed.kmph());
+        Serial.println(" STOPPED");
+        }
+      }
+  
+  txDutyCycleTime = appTxDutyCycle + randr( 0, APP_TX_DUTYCYCLE_RND );
       LoRaWAN.cycle(txDutyCycleTime);
       deviceState = DEVICE_STATE_SLEEP;
       break;
     }
     case DEVICE_STATE_SLEEP:
     {
-      LoRaWAN.displayAck();
       LoRaWAN.sleep();
       break;
     }
